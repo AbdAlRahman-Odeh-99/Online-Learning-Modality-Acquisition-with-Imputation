@@ -1,170 +1,133 @@
 import numpy as np
 from collections import Counter
 from utils import posterior_probability
-from predict import predict_all_combinations
+from predict import predict_all_combinations_proba
 
 
-def uniform_imputations(x_sample, centers, observed_mask, n_samples_per_cluster=5, radius=0.5, rng=None):
+
+def compute_responsibilities(x_sample, centers, observed_mask):
     """
-    Impute missing views with uniform samples around cluster centers.
-
-    Parameters
-    ----------
-    x_sample : array (M,)
-    centers : array (K, M)
-    observed_mask : bool (M,)
-    n_samples_per_cluster : int, number of samples per cluster
-    radius : float, half-width of uniform interval around center
-    rng : np.random.Generator, optional
-
-    Returns
-    -------
-    imputations : array (K * n_samples_per_cluster, M)
-        Each row is one candidate imputed sample
-    cluster_ids : array (K * n_samples_per_cluster,)
-        Cluster index corresponding to each imputation
+    Compute soft cluster assignments (responsibilities) given only the observed modalities.
+    
+    x_sample:      shape (M,)
+    centers:       shape (K, M)
+    observed_mask: shape (M,) boolean
+    
+    Returns: responsibilities shape (K,) summing to 1
     """
+    K = centers.shape[0]
+    log_probs = np.zeros(K)
+
+    for k in range(K):
+        # Squared distance between x_sample and cluster center, observed modalities only
+        diff = x_sample[observed_mask] - centers[k, observed_mask]
+        log_probs[k] = -0.5 * np.dot(diff, diff)  # log of Gaussian likelihood (ignoring constants)
+
+    # Softmax for numerical stability
+    log_probs -= np.max(log_probs)
+    probs = np.exp(log_probs)
+    responsibilities = probs / probs.sum()
+
+    return responsibilities  # shape (K,)
+
+def compute_scores(view_combinations, total_instances, cluster, cluster_modality_counts, combo_costs, rho, eta=0.2, c_param=1.41):
+    scores = []
+    
+    for i, combo in enumerate(view_combinations):
+        # 1. Exploitation: Expected Reward
+        r = rho[i]
+        expected_reward = (r**2) + (1 - r)**2
+
+        # 2. Exploration: UCB Bonus
+        combo_indices = [m - 1 for m in combo]  # 1-indexed to 0-indexed
+        combo_obs_count = cluster_modality_counts[cluster, combo_indices].min()
+
+        if total_instances == 0 or combo_obs_count == 0:
+            eps = 1e6
+        else:
+            eps = c_param * np.sqrt(np.log(total_instances) / combo_obs_count)
+
+        # 3. Cost penalty
+        cost_penalty = eta * combo_costs[combo]
+
+        # 4. Total Utility Score
+        score = expected_reward + eps - cost_penalty
+        scores.append(score)
+    
+    return np.array(scores)
+
+def majority_vote(decisions, rng):
+    counts = Counter(decisions)
+    max_count = max(counts.values())
+    tied_combos = [combo for combo, count in counts.items() if count == max_count]
+    return tied_combos[rng.choice(len(tied_combos))]
+
+def oneshot_acquisition(
+        view_combinations,
+        x_sample,
+        centers,
+        observed_mask,
+        total_instances,
+        combo_costs,
+        cluster_modality_counts,
+        eta=0.2,
+        c_param=1.41,
+        rng=None
+    ):
+
     if rng is None:
         rng = np.random.default_rng()
 
     M = x_sample.shape[0]
     K = centers.shape[0]
-    missing_mask = ~observed_mask # Flip to get missing modalities
+    missing_mask = ~observed_mask
+    all_scores = []  # will be shape (K * n_samples_per_cluster, n_combos)
+    max_decisions = []  # to track which combo was best for each imputation
 
-    imputations = []
-    cluster_ids = []
+    # Compute responsibilities q_{y_k | x_{0,t}} from the free view
+    responsibilities = compute_responsibilities(x_sample, centers, observed_mask)  # shape (K,)
+    #print(f"Responsibilities: {responsibilities}")
 
-    for k in range(K): # Loop over clusters
-        for _ in range(n_samples_per_cluster): # Loop to create multiple imputations per cluster
-            x_completed = x_sample.copy()
-            # Uniform sample for missing modalities
-            x_completed[missing_mask] = rng.uniform(low=centers[k, missing_mask] - radius, high=centers[k, missing_mask] + radius)
-            imputations.append(x_completed)
-            cluster_ids.append(k)
-
-    return np.array(imputations), np.array(cluster_ids)
-
-def majority_vote(predictions):
-    """
-    Majority vote over candidate predictions.
-
-    Args:
-        predictions: array-like
-
-    Returns:
-        final_prediction
-        confidence
-    """
-    counts = Counter(predictions)
-
-    final_prediction = counts.most_common(1)[0][0]
-    confidence = counts[final_prediction] / len(predictions)
-
-    return final_prediction, confidence
-
-def vote_all_combinations(imputations, centers, view_combinations):
-    """
-    Predict all combinations for all imputations,
-    then majority vote per combination.
-
-    Returns:
-        final_preds : one prediction per combination
-        confidences : one confidence per combination
-    """
-    all_preds = []
-
-    for imp in imputations:
-        preds = predict_all_combinations(imp, centers, view_combinations)
-        all_preds.append(preds)
-
-    all_preds = np.array(all_preds)   # shape = (n_imputations, n_combinations)
-
-    final_preds = []
-    confidences = []
-
-    for j in range(all_preds.shape[1]):
-        pred, conf = majority_vote(all_preds[:, j])
-        final_preds.append(pred)
-        confidences.append(conf)
-
-    return np.array(final_preds), np.array(confidences)
-
-def choose_best_combination_binary(view_combinations, final_preds, true_label, confs, combination_costs, eta, epsilons=None, threshold = 0):
-    """
-    Choose best combination using binary reward.
-
-    Args:
-        final_preds : predicted label for each combination
-        true_label : true sample label
-    """
-
-    scores = []
-
-    for combo, pred in zip(view_combinations, final_preds):
-
-        reward = int(pred == true_label)
-        cost = combination_costs[combo]
-
-        if epsilons is None:
-            eps = 0.0
-        else:
-            eps = epsilons.get(combo, 0.0)
-
-        score = reward + eps - eta * cost
-        scores.append(score)
-
-    #print(f"Combination scores: {dict(zip(view_combinations, scores))}")
-    #print(f"Combination confidences: {dict(zip(view_combinations, confs))}")
-    # Step 1: find maximum score
-    max_score = np.max(scores)
-
-    # Step 2: all candidates with same max score
-    candidate_idxs = np.where(scores == max_score)[0]
-
-    # Step 3: tie-break using confidence
-    if len(candidate_idxs) > 1:
-        best_idx = candidate_idxs[np.argmax(confs[candidate_idxs])]
-    else:
-        best_idx = candidate_idxs[0]
-
-    #print(f"Chosen combination: {view_combinations[best_idx]}, Score: {scores[best_idx]:.3f}, Confidence: {confs[best_idx]:.3f}")
-    return view_combinations[best_idx], scores[best_idx], np.array(scores)
-
-def vote_with_responsibilities(x_sample, observed_mask, imputations, cluster_ids, centers, view_combinations):
-    """
-    imputations: (S*K, M) - all generated candidates
-    cluster_ids: (S*K,) - which cluster generated each candidate
-    """
-    # Step A: Get weights for each cluster based on original observed data
-    alphas = posterior_probability(x_sample, centers, observed_mask)
-    
-    all_preds = []
-    # Step B: Get predictions for all candidates and all combinations
-    for imp in imputations:
-        preds = predict_all_combinations(imp, centers, view_combinations)
-        all_preds.append(preds)
-    
-    all_preds = np.array(all_preds) # (n_imputations, n_combinations)
-    K = centers.shape[0]
-    
-    final_preds = []
-    confidences = []
-
-    # Step C: Weighted Voting per Combination
-    for j in range(all_preds.shape[1]):
-        weighted_counts = np.zeros(K)
+    for k in range(K):    
+        x_completed = x_sample.copy()
+        # Imputation: Use the conditional mean of the missing modalities given the observed ones, which is just the cluster center's values for those modalities.
+        x_completed[missing_mask] = centers[k, missing_mask]
+        # Prediction for each combo
+        soft_preds = predict_all_combinations_proba(x_completed, centers, view_combinations) # shape (n_combos,)
+        #print(f"Soft predictions for cluster {k}: {soft_preds}")
+        # rho per combo for this specific imputation, weighted by cluster responsibility
+        rho = responsibilities[k] * soft_preds # shape (n_combos,)
+        #print(f"Rho values for cluster {k}: {rho}")
         
-        for s in range(len(all_preds)):
-            pred_label = all_preds[s, j]
-            parent_cluster = cluster_ids[s]
-            
-            # Instead of +1, we add the responsibility weight
-            weighted_counts[pred_label] += alphas[parent_cluster]
-            
-        best_pred = np.argmax(weighted_counts)
-        conf = weighted_counts[best_pred] / np.sum(weighted_counts)
-        
-        final_preds.append(best_pred)
-        confidences.append(conf)
+        # score per combo for this specific imputation
+        scores = compute_scores(
+            view_combinations=view_combinations,
+            total_instances=total_instances,
+            cluster=k,
+            cluster_modality_counts=cluster_modality_counts,
+            combo_costs=combo_costs,
+            rho=rho,
+            eta=eta,
+            c_param=c_param
+        )  # shape (n_combos,)
+
+        all_scores.append(scores)
+
+    all_scores = np.array(all_scores)  # shape (K * n_samples_per_cluster, n_combos)
+    #print(f"All scores shape: {all_scores.shape}")
+    #print(f"All scores: {all_scores}")
     
-    return np.array(final_preds), np.array(confidences)
+    max_decisions = []
+    for row_scores in all_scores:
+        max_score = np.max(row_scores)
+        tied_indices = np.where(row_scores == max_score)[0]
+        best_idx = rng.choice(tied_indices)  # random tie-break
+        max_decisions.append(view_combinations[best_idx])
+
+    #print(f"Best combos for each imputation: {max_decisions}")
+
+    majority_vote_decision = majority_vote(max_decisions, rng)
+    
+    #print(f"Majority vote decision: {majority_vote_decision}")
+    
+    return majority_vote_decision

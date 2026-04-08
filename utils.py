@@ -1,4 +1,6 @@
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 from itertools import combinations
 from scipy.optimize import linear_sum_assignment
 
@@ -96,3 +98,30 @@ def posterior_probability(x, centers, observed_mask, sigma=1.0):
     probs = np.exp(shifted_log_probs)
     
     return probs / np.sum(probs)
+
+def plot_combo_selection(combo_selection_history, view_combinations, title, save_path=None):
+    """
+    Cumulative selection count for each combo over time.
+    
+    combo_selection_history: list of chosen combos at each timestep
+    view_combinations:       list of all possible combos
+    """
+    df = pd.DataFrame(
+        {str(combo): [1 if c == combo else 0 for c in combo_selection_history]
+         for combo in view_combinations}
+    )
+    
+    df_cumsum = df.cumsum()
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    for combo in view_combinations:
+        ax.plot(df_cumsum[str(combo)], label=str(combo))
+
+    ax.set_xlabel("Horizon")
+    ax.set_ylabel("Cumulative selection count")
+    ax.set_title(title)
+    ax.legend(title="Combo", bbox_to_anchor=(1.05, 1), loc="upper left")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    #plt.show()
