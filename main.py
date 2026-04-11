@@ -64,7 +64,7 @@ for seed in RANDOM_SEED:
     base_mask = np.zeros(M_MODALITIES, dtype=bool)
     base_mask[0] = True
 
-    '''
+    
     # First-view learning
     total_reward_first, learned_centers_first, counts_first = online_learning_first_view_only(X[int(N_SAMPLES_INIT):], Y[int(N_SAMPLES_INIT):], learned_centers.copy(), true_means)
 
@@ -87,10 +87,11 @@ for seed in RANDOM_SEED:
     print(f"First-Third-view learning: AVG Reward: {np.mean(total_reward_first_third):.3f}")
     trial_first_third_views.append(np.mean(total_reward_first_third))
     print("="*50)
+    
     print(f"All-view learning: AVG Reward: {np.mean(total_reward_all):.3f}")
     trial_all_views.append(np.mean(total_reward_all))
     print("="*50)
-    '''
+    
     
     print("Starting online learning with adaptive view selection (ONESHOT)...")
     total_instances = 0

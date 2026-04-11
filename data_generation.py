@@ -74,7 +74,7 @@ def generate_synthetic_data(
     # ASSUMPTION: Cluster means are symmetric around zero for simplicity
     true_means = {}
     for m in range(m_modalities):
-        mu = rng.normal(loc=0.0, scale=1.0, size=(1, d_m))
+        mu = rng.normal(loc=0.0, scale=3.0, size=(1, d_m))
         true_means[m] = np.vstack([mu, -mu])
     true_sigmas = {m: 1.0 for m in range(m_modalities)}
     
