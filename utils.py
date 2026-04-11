@@ -37,7 +37,7 @@ def generate_combination_costs(view_combinations, cost_per_modality):
         costs: dict
             maps combination -> total cost
     """
-    costs = {}
+    costs = {(1,): cost_per_modality['1']}  # always include modality 1 cost
 
     for combo in view_combinations:
         total_cost = sum(cost_per_modality[str(mod)] for mod in combo)

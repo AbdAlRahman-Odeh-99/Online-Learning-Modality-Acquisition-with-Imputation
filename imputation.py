@@ -131,3 +131,91 @@ def oneshot_acquisition(
     #print(f"Majority vote decision: {majority_vote_decision}")
     
     return majority_vote_decision
+
+
+def sequential_acquisition(
+        view_combinations,
+        x_sample,
+        centers,
+        observed_mask,
+        total_instances,
+        combo_costs,
+        cluster_modality_counts,
+        remaining_budget,
+        eta=0.2,
+        c_param=1.41,
+        stopping_threshold=0,
+        rng=None
+    ):
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    K = centers.shape[0]
+    current_observed_mask = observed_mask.copy()
+    current_x = x_sample.copy()
+    majority_vote_combo = (1,)  # default to first modality if we end up not acquiring anything
+
+    while True:
+        observed_modalities = set(m + 1 for m in range(len(current_observed_mask)) if current_observed_mask[m])
+        #print(f"Currently observed modalities: {observed_modalities}")
+        next_available_view_combos = [
+            combo for combo in view_combinations
+            if (
+                observed_modalities.issubset(set(combo))          # must include all observed
+                and len(set(combo) - observed_modalities) == 1    # exactly one new
+            )
+        ]
+        #print(f"Next available view combos available: {next_available_view_combos}")
+
+        if not next_available_view_combos or remaining_budget == 0 or remaining_budget < min(combo_costs[combo] for combo in next_available_view_combos):
+            break
+
+        responsibilities = compute_responsibilities(current_x, centers, current_observed_mask)
+        #print(f"Responsibilities with current observed modalities: {responsibilities}")
+        all_scores = []
+
+        for k in range(K):
+            x_completed = current_x.copy()
+            missing_mask = ~current_observed_mask
+            x_completed[missing_mask] = centers[k, missing_mask]
+
+            soft_preds = predict_all_combinations_proba(x_completed, centers, next_available_view_combos)
+            #print(f"Soft predictions for cluster {k} with next available combos: {soft_preds}")
+            rho = responsibilities[k] * soft_preds
+            #print(f"Rho values for cluster {k} with next available combos: {rho}")
+
+            scores = compute_scores(
+                view_combinations=next_available_view_combos,
+                total_instances=total_instances,
+                cluster=k,
+                cluster_modality_counts=cluster_modality_counts,
+                combo_costs=combo_costs,
+                rho=rho,
+                eta=eta,
+                c_param=c_param
+            )
+            all_scores.append(scores)
+
+        all_scores = np.array(all_scores)
+        #print(f"All scores for next available combos: {all_scores}")
+        # Stop Condition: if best score across all clusters is non-positive
+        if np.max(all_scores) < stopping_threshold:
+            break
+
+        max_decisions = []
+        for row_scores in all_scores:
+            max_score = np.max(row_scores)
+            tied_indices = np.where(row_scores == max_score)[0]
+            best_idx = rng.choice(tied_indices)
+            max_decisions.append(next_available_view_combos[best_idx])
+        #print(f"Best combos for each imputation in this round: {max_decisions}")
+        majority_vote_combo = majority_vote(max_decisions, rng)
+        #print(f"Majority vote combo for this round: {majority_vote_combo}")
+        remaining_budget -= combo_costs[majority_vote_combo] - combo_costs[tuple(observed_modalities)]
+    
+        for modality_idx in majority_vote_combo:
+            current_observed_mask[modality_idx-1] = True
+
+    #print(f"Final observed mask after sequential acquisition: {current_observed_mask}, Majority vote combo: {majority_vote_combo}, Remaining budget: {remaining_budget}")
+    return majority_vote_combo, remaining_budget
